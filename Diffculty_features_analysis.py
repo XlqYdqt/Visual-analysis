@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
-
+import plotly.express as px
 # --- 1. 配置和数据加载 ---
 FILE_PATH = 'Title_Knowledge_Features_For_Analysis.csv'
 OUTPUT_DIR = 'analysis_output'
@@ -12,6 +12,65 @@ plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
 plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
 
 
+def identify_outliers(df):
+    # 计算错配得分
+    df['mismatch_score'] = df['KP_Avg_Pass_Rate'] - df['Title_Pass_Rate_Group']
+
+    # 定义异常：掌握度高但正确率低的题目
+    # 假设阈值为 0.35
+    df['is_unreasonable'] = df['mismatch_score'] > 0.35
+
+    # 绘制气泡图 (任务4要求的：题目难度-能力错配图)
+    fig = px.scatter(
+        df,
+        x='KP_Avg_Pass_Rate',  # 横轴：学生在该知识点的整体掌握度
+        y='Title_Pass_Rate_Group',  # 纵轴：该题的实际正确率
+        size='Title_Avg_Attempts_to_Pass',  # 气泡大小：平均尝试次数
+        color='is_unreasonable',
+        hover_name='title_ID',
+        labels={'KP_Avg_Pass_Rate': '知识点掌握度 (能力指标)',
+                'Title_Pass_Rate_Group': '题目正确率 (难度指标)'},
+        title='不合理题目识别：能力-难度错配图'
+    )
+    return fig
+
+
+def get_drill_down_data(full_df, student_features_df, target_title_id):
+    """
+    下钻分析：获取特定题目在不同等级学生中的表现
+    """
+    # 1. 过滤出该题的所有作答记录
+    title_records = full_df[full_df['title_ID'] == target_title_id].copy()
+
+    # 2. 关联学生等级 (假设 student_features_df 包含 student_ID 和 Level)
+    # Level 通常是通过聚类或正确率划分的 A, B, C, D
+    detailed_df = pd.merge(
+        title_records,
+        student_features_df[['student_ID', 'Level']],
+        on='student_ID',
+        how='left'
+    )
+
+    return detailed_df
+
+
+def plot_drill_down_box(detailed_df, title_id):
+    """
+    绘制下钻箱线图：展示不同等级学生对该异常题的尝试次数
+    """
+    import plotly.express as px
+
+    fig = px.box(
+        detailed_df,
+        x='Level',
+        y='attempts_count',  # 对应全量表中的尝试次数列
+        color='Level',
+        points="all",  # 显示所有点，便于观察极端值
+        category_orders={"Level": ["A", "B", "C", "D"]},  # 强制按等级排序
+        title=f"异常题目 {title_id} 的学生表现下钻",
+        labels={'attempts_count': '尝试次数', 'Level': '学生能力等级'}
+    )
+    return fig
 def load_data(file_path):
     """安全加载数据文件，并进行初步检查"""
     try:
