@@ -34,6 +34,7 @@ def load_profile_data():
 
 
 @st.cache_data
+@st.cache_data
 def load_submit_data():
     """加载原始提交数据"""
     try:
@@ -44,7 +45,7 @@ def load_submit_data():
                 df['class'] = f'Class{i}'
                 submit_dfs.append(df)
             except Exception as e:
-
+                # st.warning(f"加载Class{i}数据失败: {e}")
                 continue
 
         if not submit_dfs:
@@ -64,19 +65,46 @@ def load_submit_data():
         df_submit['student_ID'] = df_submit['student_ID'].astype(str)
         df_submit['title_ID'] = df_submit['title_ID'].astype(str)
 
-        # 处理数值列，确保它们是数值类型
-        # 处理score列
+        # 处理数值列
         if 'score' in df_submit.columns:
             df_submit['score'] = pd.to_numeric(df_submit['score'], errors='coerce').fillna(0)
 
-        # 处理timeconsume列 - 修复：将非数值转换为NaN，然后填充为0
         if 'timeconsume' in df_submit.columns:
-            # 首先尝试转换为数值，错误的值设为NaN
             df_submit['timeconsume'] = pd.to_numeric(df_submit['timeconsume'], errors='coerce')
-            # 将NaN填充为0
             df_submit['timeconsume'] = df_submit['timeconsume'].fillna(0)
-            # 确保没有负值（除了特殊的标记值）
             df_submit['timeconsume'] = df_submit['timeconsume'].apply(lambda x: max(0, x) if pd.notnull(x) else 0)
+
+        # 计算得分率
+        df_submit['score_rate'] = df_submit['score'] / 4.0
+        df_submit['is_passed'] = (df_submit['score_rate'] == 1.0).astype(int)
+
+        try:
+            # 加载题目知识点信息
+            title_info_df = pd.read_csv('Data_TitleInfo.csv', encoding='utf-8')
+
+            # 确保title_ID是字符串类型
+            title_info_df['title_ID'] = title_info_df['title_ID'].astype(str)
+
+            # 由于同一个题目可能有多个知识点，我们需要去重或处理重复
+            # 首先按title_ID分组，取第一个知识点（大知识点）
+            title_knowledge_map = title_info_df.groupby('title_ID')['knowledge'].first().to_dict()
+
+            # 将知识点信息合并到提交数据
+            df_submit['knowledge_point'] = df_submit['title_ID'].map(title_knowledge_map)
+
+            # 处理没有知识点映射的记录
+            missing_knowledge = df_submit['knowledge_point'].isnull().sum()
+            if missing_knowledge > 0:
+                st.warning(f"有 {missing_knowledge} 条记录没有对应的知识点信息")
+                # 填充未知知识点
+                df_submit['knowledge_point'] = df_submit['knowledge_point'].fillna('未知知识点')
+
+            st.info(f"✅ 成功合并知识点信息，共 {df_submit['knowledge_point'].nunique()} 个知识点")
+
+        except Exception as e:
+            st.error(f"加载或合并知识点信息时出错: {e}")
+            # 如果没有知识点信息，添加一个空列
+            df_submit['knowledge_point'] = '未知知识点'
 
         st.success(f"✅ 成功加载提交数据: {len(df_submit)} 条记录")
         return df_submit
@@ -146,12 +174,22 @@ def perform_clustering(df):
         return df
 
 
-def create_monthly_activity_heatmap(df_submit):
-    """创建月内活跃度热力图"""
+def create_monthly_activity_heatmap(df_submit, student_id=None):
+    """创建月内活跃度热力图，如果指定学生ID则只显示该学生的数据"""
     if df_submit.empty or 'date' not in df_submit.columns:
         return None
 
     try:
+        # 如果指定了学生ID，只显示该学生的数据
+        if student_id:
+            df_submit = df_submit[df_submit['student_ID'] == student_id].copy()
+            title_suffix = f"（学生 {student_id[:8]}...）"
+        else:
+            title_suffix = ""
+
+        if df_submit.empty:
+            return None
+
         # 提取小时信息
         df_submit['hour'] = df_submit['submit_time'].dt.hour
 
@@ -174,7 +212,7 @@ def create_monthly_activity_heatmap(df_submit):
         fig = px.imshow(
             pivot_data.T,
             labels=dict(x="日期", y="小时", color="提交次数"),
-            title="月内每日活跃度热力图",
+            title=f"月内每日活跃度热力图{title_suffix}",
             aspect="auto",
             color_continuous_scale="YlOrRd"
         )
@@ -562,12 +600,22 @@ def make_subplots(*args, **kwargs):
     return ms(*args, **kwargs)
 
 
-def create_fireworks_plot(df_submit):
-    """创建月内活跃度烟花图"""
+def create_fireworks_plot(df_submit, student_id=None):
+    """创建月内活跃度烟花图，如果指定学生ID则只显示该学生的数据"""
     if df_submit.empty or 'date' not in df_submit.columns:
         return None
 
     try:
+        # 如果指定了学生ID，只显示该学生的数据
+        if student_id:
+            df_submit = df_submit[df_submit['student_ID'] == student_id].copy()
+            title_suffix = f"（学生 {student_id[:8]}...）"
+        else:
+            title_suffix = ""
+
+        if df_submit.empty:
+            return None
+
         # 按日期统计活跃度
         daily_activity = df_submit.groupby('date').size()
 
@@ -626,7 +674,7 @@ def create_fireworks_plot(df_submit):
                         ))
 
         fig.update_layout(
-            title='月内活跃度烟花图',
+            title=f'月内活跃度烟花图{title_suffix}',
             xaxis_title='日期',
             yaxis_title='提交次数',
             height=400,
@@ -773,14 +821,19 @@ def create_student_analysis_timeline(df_submit, student_id):
         return None
 
 
-def create_student_performance_summary(student_data, student_id):
+def create_student_performance_summary(student_data, student_id, student_profile):
     """创建学生表现摘要"""
     if student_data.empty:
         return None
 
     # 计算关键指标
     total_submissions = len(student_data)
-    correct_rate = student_data['is_passed'].mean() * 100
+
+    # 使用学生画像数据中的正确率（更准确）
+    correct_rate_from_profile = student_profile['correct_rate'] * 100 if 'correct_rate' in student_profile else 0
+
+    # 也从提交数据中计算正确率，用于对比
+    correct_rate_from_data = student_data['is_passed'].mean() * 100
 
     # 计算不同知识点的表现
     knowledge_performance = {}
@@ -817,7 +870,8 @@ def create_student_performance_summary(student_data, student_id):
 
     #### 📊 基础指标
     - **总提交次数**: {total_submissions}
-    - **平均正确率**: {correct_rate:.1f}%
+    - **平均正确率（画像数据）**: {correct_rate_from_profile:.1f}%
+    - **平均正确率（提交数据）**: {correct_rate_from_data:.1f}%
     - **平均答题时间**: {avg_time_per_submission:.1f}秒
     - **总学习时长**: {total_time_spent:.0f}秒 ({total_time_spent / 3600:.1f}小时)
 
@@ -844,6 +898,213 @@ def create_student_performance_summary(student_data, student_id):
             summary += f"- **需加强知识点**: {worst_knowledge} ({worst_rate:.1f}%)\n"
 
     return summary
+
+
+def extract_main_knowledge(knowledge_str):
+    """从知识点字符串中提取大知识点（假设用'-'分割）"""
+    if not isinstance(knowledge_str, str):
+        return "未知知识点"
+
+    # 如果知识点包含"-"，取前面的部分作为大知识点
+    if '-' in knowledge_str:
+        return knowledge_str.split('-')[0].strip()
+    elif '/' in knowledge_str:
+        return knowledge_str.split('/')[0].strip()
+    elif ':' in knowledge_str:
+        return knowledge_str.split(':')[0].strip()
+    else:
+        return knowledge_str.strip()
+
+
+def create_student_knowledge_preference_analysis(student_data):
+    """创建学生知识点偏好分析（只按大知识点）"""
+    if student_data.empty or 'knowledge_point' not in student_data.columns:
+        return None
+
+    try:
+        # 提取大知识点
+        student_data = student_data.copy()
+        student_data['main_knowledge'] = student_data['knowledge_point'].apply(extract_main_knowledge)
+
+        # 统计不同大知识点的提交次数
+        knowledge_counts = student_data['main_knowledge'].value_counts().head(10)
+        knowledge_df = pd.DataFrame({
+            '知识点': knowledge_counts.index,
+            '提交次数': knowledge_counts.values
+        })
+
+        # 计算每个大知识点的正确率
+        knowledge_correct_rates = []
+        for knowledge in knowledge_df['知识点']:
+            knowledge_data = student_data[student_data['main_knowledge'] == knowledge]
+            correct_rate = knowledge_data['is_passed'].mean() * 100 if not knowledge_data.empty else 0
+            knowledge_correct_rates.append(correct_rate)
+
+        knowledge_df['正确率'] = knowledge_correct_rates
+
+        # 创建知识点偏好条形图
+        fig = px.bar(
+            knowledge_df,
+            y='知识点',
+            x='提交次数',
+            orientation='h',
+            title='大知识点偏好分析 (Top 10)',
+            color='正确率',
+            color_continuous_scale='RdYlGn',
+            labels={'知识点': '大知识点', '提交次数': '提交次数', '正确率': '正确率 (%)'},
+            hover_data=['正确率']
+        )
+        fig.update_layout(
+            yaxis={'categoryorder': 'total ascending'},
+            height=500
+        )
+
+        return fig, knowledge_df
+    except Exception as e:
+        st.error(f"创建知识点偏好分析时出错: {e}")
+        return None, None
+
+
+def create_student_daily_activity(df_submit, student_id):
+    """创建学生个人每日活跃度趋势"""
+    if df_submit.empty:
+        return None
+
+    try:
+        # 筛选该学生的数据
+        student_data = df_submit[df_submit['student_ID'] == student_id].copy()
+
+        if student_data.empty:
+            return None
+
+        # 按日期统计
+        daily_counts = student_data.groupby(student_data['submit_time'].dt.date).size().reset_index()
+        daily_counts.columns = ['date', 'count']
+
+        # 创建连续日期索引
+        date_range = pd.date_range(
+            start=daily_counts['date'].min(),
+            end=daily_counts['date'].max()
+        )
+
+        # 重新索引以填充缺失日期
+        daily_counts = daily_counts.set_index('date').reindex(date_range, fill_value=0).reset_index()
+        daily_counts.columns = ['date', 'count']
+
+        # 创建折线图
+        fig = px.line(
+            daily_counts,
+            x='date',
+            y='count',
+            title=f"学生 {student_id[:8]}... 每日提交量趋势",
+            labels={'date': '日期', 'count': '提交次数'},
+            markers=True
+        )
+
+        # 添加平均线
+        avg_count = daily_counts['count'].mean()
+        fig.add_hline(y=avg_count, line_dash="dash", line_color="red",
+                      annotation_text=f"日均提交: {avg_count:.1f}次",
+                      annotation_position="bottom right")
+
+        return fig
+    except Exception as e:
+        st.error(f"创建学生每日活跃度趋势图时出错: {e}")
+        return None
+
+
+def create_cluster_explanation_card(student_profile, df_profiles):
+    """创建聚类原因解释卡片"""
+    if student_profile.empty or df_profiles.empty:
+        return ""
+
+    cluster_name = student_profile['cluster_name'] if 'cluster_name' in student_profile else '未知'
+
+    # 定义聚类特征阈值
+    cluster_thresholds = {
+        '高效精英': {
+            'correct_rate': 0.7,
+            'total_attempts': 50,
+            'persistence_rate': 0.8,
+            'learning_continuity': 0.7,
+            'night_owl_ratio': 0.3
+        },
+        '勤奋挣扎者': {
+            'correct_rate': 0.5,
+            'total_attempts': 80,
+            'persistence_rate': 0.9,
+            'learning_continuity': 0.6,
+            'night_owl_ratio': 0.4
+        },
+        '普通拖延型': {
+            'correct_rate': 0.6,
+            'total_attempts': 30,
+            'persistence_rate': 0.6,
+            'learning_continuity': 0.4,
+            'night_owl_ratio': 0.5
+        },
+        '边缘夜猫子': {
+            'correct_rate': 0.4,
+            'total_attempts': 20,
+            'persistence_rate': 0.4,
+            'learning_continuity': 0.3,
+            'night_owl_ratio': 0.7
+        }
+    }
+
+    # 获取学生特征值
+    student_features = {}
+    feature_names = {
+        'correct_rate': '正确率',
+        'total_attempts': '尝试次数',
+        'persistence_rate': '坚持率',
+        'learning_continuity': '学习连续性',
+        'night_owl_ratio': '夜间学习比例'
+    }
+
+    for feature in feature_names.keys():
+        if feature in student_profile:
+            student_features[feature] = student_profile[feature]
+        else:
+            student_features[feature] = 0
+
+    # 获取聚类平均值
+    cluster_avg = {}
+    if cluster_name in df_profiles['cluster_name'].values:
+        cluster_data = df_profiles[df_profiles['cluster_name'] == cluster_name]
+        for feature in feature_names.keys():
+            if feature in cluster_data.columns:
+                cluster_avg[feature] = cluster_data[feature].mean()
+
+    # 创建解释文本
+    explanation = f"### 📍 聚类归属解释\n\n"
+    explanation += f"该学生被归类为 **{cluster_name}**，主要基于以下特征：\n\n"
+
+    for feature, display_name in feature_names.items():
+        if feature in student_features:
+            student_val = student_features[feature]
+            cluster_val = cluster_avg.get(feature, 0)
+
+            if feature in ['correct_rate', 'persistence_rate', 'learning_continuity', 'night_owl_ratio']:
+                student_val_display = f"{student_val * 100:.1f}%"
+                cluster_val_display = f"{cluster_val * 100:.1f}%"
+            else:
+                student_val_display = f"{student_val:.0f}"
+                cluster_val_display = f"{cluster_val:.0f}"
+
+            explanation += f"- **{display_name}**: {student_val_display} (该聚类平均: {cluster_val_display})\n"
+
+    # 添加聚类特点描述
+    cluster_descriptions = {
+        '高效精英': '具有高正确率和高学习效率，学习习惯良好，通常能快速掌握知识',
+        '勤奋挣扎者': '学习投入度高但效率偏低，可能需要更多方法指导和时间管理策略',
+        '普通拖延型': '学习行为较为分散，存在一定拖延倾向，需要提高学习连续性',
+        '边缘夜猫子': '夜间学习活跃度高，但整体学习参与度和表现偏低，需关注学习习惯和作息'
+    }
+
+    explanation += f"\n**聚类特点**: {cluster_descriptions.get(cluster_name, '暂无详细描述')}"
+
+    return explanation
 
 
 def main():
@@ -908,22 +1169,31 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔍 特定学生分析")
 
-    # 获取所有学生ID列表
-    all_student_ids = df_profiles['student_ID'].tolist()
+    # 获取当前选择聚类内的学生ID列表
+    if selected_cluster == '所有学习者':
+        # 如果是所有学习者，搜索所有学生
+        current_cluster_student_ids = df_profiles['student_ID'].tolist()
+        cluster_student_count = len(df_profiles)
+    else:
+        # 如果是特定聚类，只搜索该聚类内的学生
+        current_cluster_student_ids = df_profiles[df_profiles['cluster_name'] == selected_cluster][
+            'student_ID'].tolist()
+        cluster_student_count = len(current_cluster_student_ids)
+        st.sidebar.info(f"当前聚类 **{selected_cluster}** 共有 {cluster_student_count} 名学生")
 
     # 创建学生搜索框
     student_search = st.sidebar.text_input(
         "搜索学生ID",
-        placeholder="输入学生ID或部分ID进行搜索",
-        help="输入学生ID可以查看特定学生的详细分析"
+        placeholder=f"在当前聚类中输入学生ID搜索",
+        help=f"在当前聚类({selected_cluster})中搜索学生ID"
     )
 
     selected_student_id = None
 
     # 如果输入了搜索词，显示匹配的学生
     if student_search:
-        # 搜索匹配的学生ID
-        matching_students = [sid for sid in all_student_ids if student_search.lower() in sid.lower()]
+        # 在当前聚类的学生中搜索匹配的学生ID
+        matching_students = [sid for sid in current_cluster_student_ids if student_search.lower() in sid.lower()]
 
         if matching_students:
             # 显示匹配的学生列表
@@ -956,7 +1226,7 @@ def main():
                             selected_student_id = sid
                             break
         else:
-            st.sidebar.warning("未找到匹配的学生")
+            st.sidebar.warning(f"在当前聚类中未找到匹配的学生")
 
     # 如果选择了特定学生，更新筛选数据
     if selected_student_id:
@@ -981,17 +1251,27 @@ def main():
         student_cluster = df_filtered['cluster_name'].iloc[0] if not df_filtered.empty else '未知'
         st.sidebar.markdown(f"**当前分析**: 学生 {selected_student_id[:12]}...")
         st.sidebar.markdown(f"**所属聚类**: {student_cluster}")
+
+        # 显示聚类原因解释
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### 📋 聚类归属原因")
+        student_profile = df_filtered.iloc[0] if not df_filtered.empty else pd.Series()
+        explanation = create_cluster_explanation_card(student_profile, df_profiles)
+        if explanation:
+            st.sidebar.markdown(explanation)
     else:
         st.sidebar.markdown(f"**当前分析**: {selected_cluster if 'selected_cluster' in locals() else '所有学习者'}")
+        if selected_cluster != '所有学习者':
+            st.sidebar.markdown(f"**聚类学生数**: {cluster_student_count} 名")
     st.sidebar.markdown(f"**筛选结果**: {len(df_filtered)} 名学习者")
-
     # 标签页布局
     if selected_student_id:
         # 如果是特定学生分析，显示不同的标签页
-        tab1, tab2, tab3 = st.tabs([
+        tab1, tab2, tab3, tab4 = st.tabs([
             "📊 学生详细分析",
             "⏰ 时间模式分析",
-            "📅 月内活跃度"
+            "📅 月内活跃度",
+            "🎯 知识点偏好分析"  # 修改标签页名称
         ])
     else:
         # 如果是聚类分析，显示原来的标签页
@@ -1028,9 +1308,16 @@ def main():
                     if 'learning_continuity' in student_profile:
                         st.metric("学习连续性", f"{student_profile['learning_continuity'] * 100:.1f}%")
 
+                # 解释正确率不一致问题
+                st.info("""
+                **注意**：上方正确率来自学生画像数据（基于所有提交的得分率计算），
+                而下方摘要中的正确率可能基于不同的计算方法（如是否完全正确）。
+                学生画像数据中的正确率通常更准确地反映了学生的整体表现。
+                """)
+
                 # 学生表现摘要
                 st.markdown("---")
-                summary = create_student_performance_summary(student_submit_data, selected_student_id)
+                summary = create_student_performance_summary(student_submit_data, selected_student_id, student_profile)
                 if summary:
                     st.markdown(summary)
 
@@ -1067,26 +1354,6 @@ def main():
                         )
                         knowledge_fig.update_layout(xaxis_tickangle=45)
                         st.plotly_chart(knowledge_fig, use_container_width=True)
-
-                # 时间模式分析
-                st.markdown("---")
-                st.subheader("⏰ 学习时间模式")
-
-                if 'submit_time' in student_submit_data.columns:
-                    # 提取小时信息
-                    student_submit_data['hour'] = student_submit_data['submit_time'].dt.hour
-                    hour_dist = student_submit_data['hour'].value_counts().sort_index()
-
-                    hour_fig = px.bar(
-                        x=hour_dist.index,
-                        y=hour_dist.values,
-                        title='按小时提交分布',
-                        labels={'x': '小时 (24小时制)', 'y': '提交次数'},
-                        color=hour_dist.values,
-                        color_continuous_scale='sunset'
-                    )
-                    hour_fig.update_xaxes(tickmode='linear', dtick=1)
-                    st.plotly_chart(hour_fig, use_container_width=True)
             else:
                 st.warning("无法获取学生详细数据")
 
@@ -1106,35 +1373,152 @@ def main():
             st.header("月内活跃度分析")
 
             if not df_submit.empty:
-                # 热力图
-                heatmap_fig = create_monthly_activity_heatmap(df_submit)
+                # 热力图 - 只显示该学生的数据
+                heatmap_fig = create_monthly_activity_heatmap(df_submit, selected_student_id)
                 if heatmap_fig:
                     st.plotly_chart(heatmap_fig, use_container_width=True)
 
-                # 烟花图和趋势图
-                col1, col2 = st.columns(2)
-                with col1:
-                    # 烟花图
-                    fireworks_fig = create_fireworks_plot(df_submit)
-                    if fireworks_fig:
-                        st.plotly_chart(fireworks_fig, use_container_width=True)
-
-                with col2:
-                    # 每日提交量趋势
-                    daily_counts = df_submit.groupby(df_submit['submit_time'].dt.date).size().reset_index()
-                    daily_counts.columns = ['date', 'count']
-
-                    daily_fig = px.line(
-                        daily_counts,
-                        x='date',
-                        y='count',
-                        title="每日提交量趋势",
-                        labels={'date': '日期', 'count': '提交次数'},
-                        markers=True
-                    )
+                # 学生个人每日活跃度趋势
+                daily_fig = create_student_daily_activity(df_submit, selected_student_id)
+                if daily_fig:
                     st.plotly_chart(daily_fig, use_container_width=True)
+
+                # 烟花图 - 只显示该学生的数据
+                fireworks_fig = create_fireworks_plot(df_submit, selected_student_id)
+                if fireworks_fig:
+                    st.plotly_chart(fireworks_fig, use_container_width=True)
             else:
                 st.warning("无法显示月内活跃度分析，提交数据加载失败")
+
+        with tab4:
+            st.header("知识点偏好分析")
+
+            if not df_submit.empty:
+                student_submit_data = df_submit[df_submit['student_ID'] == selected_student_id]
+
+                if not student_submit_data.empty and 'knowledge_point' in student_submit_data.columns:
+                    # 显示基础统计
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        unique_knowledge = student_submit_data['knowledge_point'].nunique()
+                        st.metric("涉及知识点数", f"{unique_knowledge}")
+                    with col2:
+                        total_submissions = len(student_submit_data)
+                        st.metric("总提交次数", f"{total_submissions}")
+                    with col3:
+                        if 'is_passed' in student_submit_data.columns:
+                            correct_rate = student_submit_data['is_passed'].mean() * 100
+                            st.metric("整体正确率", f"{correct_rate:.1f}%")
+
+                    # 知识点偏好分析
+                    st.subheader("📚 大知识点偏好分析")
+                    knowledge_fig, knowledge_df = create_student_knowledge_preference_analysis(student_submit_data)
+
+                    if knowledge_fig:
+                        st.plotly_chart(knowledge_fig, use_container_width=True)
+                    else:
+                        st.warning("无法生成知识点偏好图表")
+
+                    # 知识点偏好总结
+                    st.subheader("🎯 知识点偏好总结")
+
+                    if knowledge_df is not None and not knowledge_df.empty:
+                        # 计算知识点覆盖度
+                        # 所有大知识点
+                        all_main_knowledge = df_submit.copy()
+                        if 'knowledge_point' in all_main_knowledge.columns:
+                            all_main_knowledge['main_knowledge'] = all_main_knowledge['knowledge_point'].apply(
+                                extract_main_knowledge)
+                            unique_student_knowledge = student_submit_data['knowledge_point'].apply(
+                                extract_main_knowledge).nunique()
+                            total_knowledge = all_main_knowledge['main_knowledge'].nunique()
+                        else:
+                            unique_student_knowledge = 0
+                            total_knowledge = 0
+
+                        # 获取最偏好和最不偏好的知识点
+                        if len(knowledge_df) >= 2:
+                            most_preferred = knowledge_df.iloc[0]
+                            least_preferred = knowledge_df.iloc[-1]
+
+                            st.markdown(f"""
+                            #### 📊 知识点偏好统计
+                            - **最偏好知识点**: {most_preferred['知识点']}
+                              - 提交次数: {most_preferred['提交次数']}次
+                              - 正确率: {most_preferred['正确率']:.1f}%
+                            - **最少涉及知识点**: {least_preferred['知识点']}
+                              - 提交次数: {least_preferred['提交次数']}次
+                              - 正确率: {least_preferred['正确率']:.1f}%
+                            """)
+
+                        # 知识点覆盖率
+                        if total_knowledge > 0:
+                            coverage_rate = unique_student_knowledge / total_knowledge * 100
+                            st.markdown(f"""
+                            #### 📈 知识点覆盖情况
+                            - **涉及大知识点数**: {unique_student_knowledge}个
+                            - **总大知识点数**: {total_knowledge}个
+                            - **大知识点覆盖率**: {coverage_rate:.1f}%
+                            """)
+
+                        # 学习建议
+                        st.subheader("💡 学习建议")
+
+                        # 根据偏好情况给出建议
+                        if knowledge_df is not None and len(knowledge_df) >= 3:
+                            # 获取正确率最高和最低的知识点
+                            knowledge_df_sorted_by_correct = knowledge_df.sort_values('正确率', ascending=False)
+                            best_knowledge = knowledge_df_sorted_by_correct.iloc[0]
+                            worst_knowledge = knowledge_df_sorted_by_correct.iloc[-1]
+
+                            if best_knowledge['正确率'] >= 70:
+                                st.success(
+                                    f"**优势领域**: {best_knowledge['知识点']}（正确率: {best_knowledge['正确率']:.1f}%）")
+                            else:
+                                st.info(
+                                    f"**相对优势**: {best_knowledge['知识点']}（正确率: {best_knowledge['正确率']:.1f}%）")
+
+                            if worst_knowledge['正确率'] <= 50:
+                                st.warning(
+                                    f"**需加强领域**: {worst_knowledge['知识点']}（正确率: {worst_knowledge['正确率']:.1f}%）")
+                            else:
+                                st.info(
+                                    f"**可提升领域**: {worst_knowledge['知识点']}（正确率: {worst_knowledge['正确率']:.1f}%）")
+
+                            # 学习平衡性建议
+                            if coverage_rate < 50:
+                                st.warning("**建议**: 知识点覆盖较窄，建议尝试更多不同类型的大知识点题目")
+                            elif coverage_rate > 80:
+                                st.success("**优势**: 知识点覆盖广泛，学习全面性较好")
+                            else:
+                                st.info("**建议**: 知识点覆盖适中，继续保持学习广度")
+
+                        # 显示学生的top_knowledge（如果画像数据中有）
+                        if student_profile is not None and 'top_knowledge' in student_profile:
+                            top_knowledge = student_profile['top_knowledge']
+                            if pd.notna(top_knowledge):
+                                st.markdown("---")
+                                st.subheader("📋 画像数据中的知识点信息")
+                                st.info(f"**最常提交的知识点**: {top_knowledge}")
+                    else:
+                        st.warning("没有足够的知识点数据进行详细分析")
+
+                    # 知识点分布统计表
+                    if knowledge_df is not None and not knowledge_df.empty:
+                        st.subheader("📋 知识点分布详情")
+                        display_df = knowledge_df.copy()
+                        display_df['正确率'] = display_df['正确率'].apply(lambda x: f"{x:.1f}%")
+                        st.dataframe(display_df, use_container_width=True)
+
+                else:
+                    if student_submit_data.empty:
+                        st.warning("该学生没有提交记录")
+                    else:
+                        st.warning("提交数据中缺少知识点信息。请检查Data_TitleInfo.csv文件是否包含正确的知识点映射。")
+                        # 显示有哪些列可用
+                        st.info(f"可用的列: {', '.join(student_submit_data.columns.tolist())}")
+            else:
+                st.warning("无法进行知识点偏好分析，提交数据加载失败")
 
     else:
         # 聚类分析模式
